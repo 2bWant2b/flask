@@ -1,70 +1,82 @@
-from flask_restful import Resource, reqparse
-from flask_jwt import jwt_required
+from flask_restful import Resource
+from flask import request
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from models.item import ItemModel
+from schemas.item import ItemSchema
 
+
+ITEM_NOT_FOUND = "item {} not found."
+NAME_ALREADY_EXISTS = "the item {} already exists."
+ERROR_INSERTING = "An error occurred while inserting the item {}."
+ITEM_DELETED = "item {} deleted."
+
+item_schema = ItemSchema()
+item_list_schema = ItemSchema(many=True)
 
 class Item(Resource):
-    parser = reqparse.RequestParser()  # request parsing
-    parser.add_argument("price",
-                        type=float,
-                        required=True,
-                        help="this field cannot be left blank"
-                        )
-    parser.add_argument("store_id",
-                        type=int,
-                        required=True,
-                        help="every item needs a store id"
-                        )
-
     @jwt_required()
     def get(self, name):
         item = ItemModel.find_by_name(name)
         if item:
-            return item.json()
-        return {"message": f"item not {name} found"}, 404
+            return item_schema.dump(item), 200
+        return {"message": ITEM_NOT_FOUND.format(name)}, 404
 
+    @jwt_required(refresh=True)  # TODO 无效果
     def post(self, name):
         if ItemModel.find_by_name(name):
-            return {"message": f"An item with name {name} already exists."}, 400
+            return {"message": NAME_ALREADY_EXISTS.format(name)}, 400
 
-        data = Item.parser.parse_args()
-        item = ItemModel(name, **data)  # data["price"], data["store_id"]
+        item_json = request.get_json()
+        item_json["name"] = name
+        item_data = item_schema.load(item_json)
+        item = ItemModel(**item_data)
 
         try:
             item.save_to_db()
         except:
-            return {"message": f"An error occurred inserting the item {name}"}, 500  # internal server error
+            return {"message": ERROR_INSERTING.format(name)}, 500  # internal server error
 
-        return item.json(), 201  # CREATED
+        return item_schema.dump(item), 201  # CREATED
 
+    @jwt_required()
     def delete(self, name):
+        claims = get_jwt()
+        if not claims["is_admin"]:
+            return {"message": "Admin privilege required"}, 401
         item = ItemModel.find_by_name(name)
         if item:
             item.delete_from_db()
-        # connection = sqlite3.Connection("./data.db")
-        # cursor = connection.cursor()
-        #
-        # query = "DELETE FROM items WHERE name=?"
-        # cursor.execute(query, (name,))
-        #
-        # connection.commit()
-        # connection.close()
+            return {"message": ITEM_DELETED.format(name)}
 
-        return {"message": f"item {name} deleted"}
+        return {"message": ITEM_NOT_FOUND.format(name)}
 
     def put(self, name):
-        data = Item.parser.parse_args()
+        item_json = request.get_json()
         item = ItemModel.find_by_name(name)
 
-        if item is None:
-            item = ItemModel(name, **data)  # data["price"], data["store_id"]
+        if item:
+            item.price = item_json["price"]
+            item.store_id = item_json["store_id"]
         else:
-            item.price = data["price"]
+            item_json["name"] = name
+            item_data = item_schema.load(item_json)
+            item = ItemModel(**item_data)
+
         item.save_to_db()
 
-        return item.json()
+        return item_schema.dump(item), 200
 
 
 class ItemList(Resource):
+    @jwt_required(optional=True)
     def get(self):
-        return {"items": [item.json() for item in ItemModel.query.all()]}
+        user_id = get_jwt_identity()
+        items = item_list_schema.dump(ItemModel.query.all())
+        if user_id:
+            return {"items": items}
+
+        return {
+            "items": [item["name"] for item in items],
+            "message": "You need to log in to get more information"
+        }, 200
+
